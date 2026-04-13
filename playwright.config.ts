@@ -1,0 +1,25 @@
+import { defineConfig, devices } from '@playwright/test'
+
+export default defineConfig({
+  testDir: './tests',
+  timeout: 90_000,         // 90s per test — bot can be slow
+  retries: 1,
+  workers: 1,              // serial — one browser session at a time
+  reporter: [
+    ['html', { outputFolder: 'report', open: 'never' }],
+    ['list'],
+  ],
+  use: {
+    baseURL: 'https://bythanh.com',
+    headless: true,
+    video: 'on',
+    screenshot: 'only-on-failure',
+    trace: 'on-first-retry',
+  },
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
+})
