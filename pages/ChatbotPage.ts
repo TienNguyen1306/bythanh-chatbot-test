@@ -72,19 +72,34 @@ export class ChatbotPage {
   async waitForBotResponse(timeoutMs = 60_000): Promise<{ responded: boolean; elapsedMs: number; text: string }> {
     const start = Date.now()
     const countBefore = await this.page.locator(this.messageSel).count()
+    // Snapshot full body text as baseline so we can extract only what the bot added
+    const textBefore = await this.page.evaluate(() => document.body.innerText)
 
     try {
       await this.page.waitForFunction(
-        ({ sel, prevCount }: { sel: string; prevCount: number }) => {
+        ({ sel, prevCount, prevLen }: { sel: string; prevCount: number; prevLen: number }) => {
           const msgs = document.querySelectorAll(sel)
-          return msgs.length > prevCount
+          const newElementDetected = msgs.length > prevCount
+          // Fallback: detect bot response via significant page text growth (>50 chars)
+          const textGrown = document.body.innerText.length > prevLen + 50
+          return newElementDetected || textGrown
         },
-        { sel: this.messageSel, prevCount: countBefore },
+        { sel: this.messageSel, prevCount: countBefore, prevLen: textBefore.length },
         { timeout: timeoutMs }
       )
 
       const elapsedMs = Date.now() - start
-      const text = await this.getLastBotMessage()
+
+      // Try CSS-selector-based extraction first
+      let text = await this.getLastBotMessage()
+
+      // Fallback: extract only the NEW portion of page text (avoids returning container/parent text)
+      // This is reliable because chatbots append messages sequentially
+      if (!text) {
+        const textAfter = await this.page.evaluate(() => document.body.innerText)
+        text = textAfter.slice(textBefore.length).trim()
+      }
+
       return { responded: true, elapsedMs, text }
     } catch {
       return { responded: false, elapsedMs: Date.now() - start, text: '' }
@@ -92,10 +107,33 @@ export class ChatbotPage {
   }
 
   async getLastBotMessage(): Promise<string> {
+    // Try the configured CSS class selectors first
     const messages = this.page.locator(this.messageSel)
     const count = await messages.count()
-    if (count === 0) return ''
-    return (await messages.last().innerText()).trim()
+    if (count > 0) {
+      return (await messages.last().innerText()).trim()
+    }
+
+    // Fallback selectors for chatbots that use different class naming conventions
+    const fallbackSelectors = [
+      '[class*="bot" i]',
+      '[class*="assistant" i]',
+      '[class*="answer" i]',
+      '[class*="reply" i]',
+      '[class*="msg" i]',
+      '[data-role="assistant"]',
+      '[data-sender="bot"]',
+      '[data-type="bot"]',
+    ]
+    for (const sel of fallbackSelectors) {
+      const els = this.page.locator(sel)
+      const cnt = await els.count()
+      if (cnt > 0) {
+        return (await els.last().innerText()).trim()
+      }
+    }
+
+    return ''
   }
 
   async getAllMessages(): Promise<string[]> {
@@ -115,7 +153,7 @@ export class ChatbotPage {
   // ─── State Checks ──────────────────────────────────────────────────────────
 
   async isInputVisible(): Promise<boolean> {
-    return this.page.locator(this.inputSel).first().isVisible({ timeout: 5_000 }).catch(() => false)
+    return this.page.locator(this.inputSel).first().isVisible({ timeout: 10000 }).catch(() => false)
   }
 
   async isSendButtonDisabled(): Promise<boolean> {
@@ -127,7 +165,10 @@ export class ChatbotPage {
 
   async getInputValue(): Promise<string> {
     const input = await this.getInputField()
-    return input.inputValue().catch(() => '')
+    // inputValue() works for <input>/<textarea>; contenteditable needs innerText()
+    return input.inputValue().catch(async () => {
+      return (await input.innerText().catch(() => '')).trim()
+    })
   }
 
   async hasGreeting(): Promise<boolean> {
