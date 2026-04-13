@@ -11,14 +11,15 @@ import { chromium } from '@playwright/test'
 import { ChatbotPage } from '../pages/ChatbotPage'
 
 const BASE_URL = 'https://bythanh.com'
-const BOT_TIMEOUT_MS = 60_000
+const BOT_TIMEOUT_MS = 120_000
 
 // ─── Fixture-like wrapper ──────────────────────────────────────────────────────
 // Mirrors what chatbot.fixture.ts does, but for non-test context
 
 async function withChatbot<T>(fn: (chatbot: ChatbotPage) => Promise<T>): Promise<T> {
   const browser = await chromium.launch({ headless: true })
-  const page = await browser.newPage()
+  const context = await browser.newContext({ baseURL: BASE_URL })
+  const page = await context.newPage()
   try {
     const chatbot = new ChatbotPage(page)
     await chatbot.open()
@@ -31,8 +32,10 @@ async function withChatbot<T>(fn: (chatbot: ChatbotPage) => Promise<T>): Promise
 
 // ─── Promptfoo Provider Interface ─────────────────────────────────────────────
 
-module.exports = {
-  id: 'bythanh-chatbot-playwright',
+export default class BythanhChatbotProvider {
+  id() {
+    return 'bythanh-chatbot-playwright'
+  }
 
   async callApi(prompt: string) {
     try {
@@ -64,5 +67,5 @@ module.exports = {
         tokenUsage: {},
       }
     }
-  },
+  }
 }

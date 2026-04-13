@@ -4,11 +4,11 @@ export class ChatbotPage {
   readonly page: Page
 
   // Selectors — update if website changes
-  private readonly chatTriggerSel = 'button:has-text("Chat"), a:has-text("Chat now"), [class*="chat-trigger"], [class*="chatbot-trigger"]'
-  private readonly inputSel       = 'input[type="text"], textarea, [contenteditable="true"], [placeholder*="message" i], [placeholder*="chat" i], [placeholder*="ask" i], [placeholder*="type" i]'
-  private readonly sendBtnSel     = 'button[type="submit"], button:has-text("Send"), button:has-text("Gửi"), [aria-label*="send" i]'
-  private readonly messageSel     = '[class*="message"], [class*="chat-message"], [class*="bubble"], [class*="bot-response"], [class*="response"]'
-  private readonly botMessageSel  = '[class*="bot"], [class*="assistant"], [class*="ai-message"], [data-role="assistant"]'
+  private readonly chatTriggerSel = '#robotContainer, [class*="robot_robotContainer"], [class*="chat-trigger"], [class*="chatbot-trigger"], button:has-text("Chat"), a:has-text("Chat now")'
+  private readonly inputSel       = 'input[class*="chat_input"], input[type="text"], textarea, [contenteditable="true"], [placeholder*="message" i], [placeholder*="chat" i], [placeholder*="ask" i], [placeholder*="type" i]'
+  private readonly sendBtnSel     = '[class*="chat_button"], button[type="submit"], button:has-text("Send"), button:has-text("Gửi"), [aria-label*="send" i]'
+  private readonly messageSel     = '[class*="assistantMessage"], [class*="chat_messages"] > div, [class*="message"], [class*="bubble"]'
+  private readonly botMessageSel  = '[class*="assistantMessage"]'
 
   constructor(page: Page) {
     this.page = page
@@ -24,10 +24,17 @@ export class ChatbotPage {
   // ─── Chat Interaction ──────────────────────────────────────────────────────
 
   async openChat(): Promise<boolean> {
+    // Check if chat input is already visible (chatbot embedded and auto-opened)
+    const input = this.page.locator(this.inputSel).first()
+    const alreadyOpen = await input.isVisible({ timeout: 3_000 }).catch(() => false)
+    if (alreadyOpen) return true
+
+    // Try clicking the chat trigger to open the panel
     const trigger = this.page.locator(this.chatTriggerSel).first()
     if (await trigger.isVisible({ timeout: 5_000 }).catch(() => false)) {
       await trigger.click()
-      await this.page.waitForTimeout(1_000)
+      // Wait for the chat input to appear (chat panel opened)
+      await input.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {})
       return true
     }
     return false   // chatbot may already be open
@@ -52,7 +59,7 @@ export class ChatbotPage {
     const send = await this.getSendButton()
     const sendVisible = await send.isVisible({ timeout: 3_000 }).catch(() => false)
     if (sendVisible) {
-      await send.click()
+      await send.click({ force: true }).catch(() => this.page.keyboard.press('Enter'))
     } else {
       await this.page.keyboard.press('Enter')
     }
@@ -71,30 +78,52 @@ export class ChatbotPage {
    */
   async waitForBotResponse(timeoutMs = 60_000): Promise<{ responded: boolean; elapsedMs: number; text: string }> {
     const start = Date.now()
-    const countBefore = await this.page.locator(this.messageSel).count()
+    const countBefore = await this.page.locator(this.botMessageSel).count()
     // Snapshot full body text as baseline so we can extract only what the bot added
     const textBefore = await this.page.evaluate(() => document.body.innerText)
 
     try {
+      // Wait until a new assistant message appears OR significant text growth
       await this.page.waitForFunction(
-        ({ sel, prevCount, prevLen }: { sel: string; prevCount: number; prevLen: number }) => {
-          const msgs = document.querySelectorAll(sel)
+        ({ botSel, prevCount, prevLen }: { botSel: string; prevCount: number; prevLen: number }) => {
+          const msgs = document.querySelectorAll(botSel)
           const newElementDetected = msgs.length > prevCount
           // Fallback: detect bot response via significant page text growth (>50 chars)
           const textGrown = document.body.innerText.length > prevLen + 50
           return newElementDetected || textGrown
         },
-        { sel: this.messageSel, prevCount: countBefore, prevLen: textBefore.length },
+        { botSel: this.botMessageSel, prevCount: countBefore, prevLen: textBefore.length },
         { timeout: timeoutMs }
       )
 
+      // Wait for the "waiting/typing" indicator to disappear (bot finished generating)
+      const remainingMs = Math.max(timeoutMs - (Date.now() - start), 10_000)
+      await this.page.locator('#waitingMessage, [class*="waitingMessage"]').waitFor({ state: 'hidden', timeout: remainingMs }).catch(() => {})
+
+      // Wait for response text to stabilize (not just dots / still streaming)
+      const stabilizeDeadline = Date.now() + remainingMs
+      let stableText = ''
+      let previousText = ''
+      let stableCount = 0
+      while (Date.now() < stabilizeDeadline) {
+        const current = await this.getLastBotMessage()
+        const isOnlyDots = /^\.+$/.test(current.trim())
+        if (!isOnlyDots && current === previousText && current.trim().length > 0) {
+          stableCount++
+          if (stableCount >= 2) { stableText = current; break }
+        } else {
+          stableCount = 0
+        }
+        previousText = current
+        await this.page.waitForTimeout(500)
+      }
+
       const elapsedMs = Date.now() - start
 
-      // Try CSS-selector-based extraction first
-      let text = await this.getLastBotMessage()
+      // Try specific bot message selector first (most accurate)
+      let text = stableText || await this.getLastBotMessage()
 
-      // Fallback: extract only the NEW portion of page text (avoids returning container/parent text)
-      // This is reliable because chatbots append messages sequentially
+      // Fallback: extract only the NEW portion of page text
       if (!text) {
         const textAfter = await this.page.evaluate(() => document.body.innerText)
         text = textAfter.slice(textBefore.length).trim()
@@ -107,30 +136,11 @@ export class ChatbotPage {
   }
 
   async getLastBotMessage(): Promise<string> {
-    // Try the configured CSS class selectors first
-    const messages = this.page.locator(this.messageSel)
-    const count = await messages.count()
-    if (count > 0) {
-      return (await messages.last().innerText()).trim()
-    }
-
-    // Fallback selectors for chatbots that use different class naming conventions
-    const fallbackSelectors = [
-      '[class*="bot" i]',
-      '[class*="assistant" i]',
-      '[class*="answer" i]',
-      '[class*="reply" i]',
-      '[class*="msg" i]',
-      '[data-role="assistant"]',
-      '[data-sender="bot"]',
-      '[data-type="bot"]',
-    ]
-    for (const sel of fallbackSelectors) {
-      const els = this.page.locator(sel)
-      const cnt = await els.count()
-      if (cnt > 0) {
-        return (await els.last().innerText()).trim()
-      }
+    // Use the specific bot/assistant message selector, excluding the waiting/typing indicator
+    const botMessages = this.page.locator(`${this.botMessageSel}:not(#waitingMessage):not([class*="waitingMessage"])`)
+    const botCount = await botMessages.count()
+    if (botCount > 0) {
+      return (await botMessages.last().innerText()).trim()
     }
 
     return ''

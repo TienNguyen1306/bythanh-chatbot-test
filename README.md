@@ -38,6 +38,14 @@ cp .env.example .env
 # Add your Gemini API key → https://aistudio.google.com/apikey
 ```
 
+> **Node.js version note:** This project requires **Node.js v20 or later**.  
+> If you upgrade Node.js after installing, native modules may fail with a  
+> `NODE_MODULE_VERSION` mismatch error. Fix it by running:
+>
+> ```bash
+> npm rebuild better-sqlite3
+> ```
+
 ---
 
 ## Running Tests
