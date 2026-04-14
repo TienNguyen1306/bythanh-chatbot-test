@@ -7,17 +7,31 @@
  * Run: npm run eval
  */
 
-import { chromium } from '@playwright/test'
+import { chromium, Browser } from '@playwright/test'
 import { ChatbotPage } from '../pages/ChatbotPage'
 
 const BASE_URL = 'https://bythanh.com'
 const BOT_TIMEOUT_MS = 120_000
 
-// ─── Fixture-like wrapper ──────────────────────────────────────────────────────
-// Mirrors what chatbot.fixture.ts does, but for non-test context
+// ─── Browser singleton ────────────────────────────────────────────────────────
+// Reuse one browser across all concurrent test cases.
+// Using a promise singleton avoids race conditions when maxConcurrency > 1:
+// multiple callApi() calls hitting this simultaneously all await the same promise.
+
+let browserPromise: Promise<Browser> | null = null
+
+async function getSharedBrowser(): Promise<Browser> {
+  if (!browserPromise) {
+    browserPromise = chromium.launch({ headless: true }).catch((err) => {
+      browserPromise = null   // reset so next call retries
+      throw err
+    })
+  }
+  return browserPromise
+}
 
 async function withChatbot<T>(fn: (chatbot: ChatbotPage) => Promise<T>): Promise<T> {
-  const browser = await chromium.launch({ headless: true })
+  const browser = await getSharedBrowser()
   const context = await browser.newContext({ baseURL: BASE_URL })
   const page = await context.newPage()
   try {
@@ -26,7 +40,7 @@ async function withChatbot<T>(fn: (chatbot: ChatbotPage) => Promise<T>): Promise
     await chatbot.openChat()
     return await fn(chatbot)
   } finally {
-    await browser.close()
+    await context.close()   // close context (tab), keep browser alive
   }
 }
 
